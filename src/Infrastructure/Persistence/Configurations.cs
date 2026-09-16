@@ -45,14 +45,19 @@ public sealed class UserConfiguration : IEntityTypeConfiguration<User>
         ConfigureTenantColumn(builder);
     }
 
+    /// <summary>
+    /// Every tenant scoped query begins with TenantId, so every index on a
+    /// tenant owned table leads with that column. What this method deliberately
+    /// does not do is add a standalone index on TenantId: each configuration
+    /// below already declares a composite index starting with it, and SQL
+    /// Server can use a leading column prefix. A second index on the same
+    /// leading column would be redundant and would cost a write on every
+    /// insert for nothing.
+    /// </summary>
     internal static void ConfigureTenantColumn<TEntity>(EntityTypeBuilder<TEntity> builder)
         where TEntity : class, Domain.Common.ITenantOwned
     {
         builder.Property(entity => entity.TenantId).IsRequired();
-
-        // Every tenant scoped query begins with this column, so it leads the
-        // index. Without it each query scans the whole table and filters.
-        builder.HasIndex(entity => entity.TenantId);
     }
 }
 
@@ -132,7 +137,9 @@ public sealed class OrderItemConfiguration : IEntityTypeConfiguration<OrderItem>
 
         builder.Ignore(item => item.LineTotal);
 
-        builder.HasIndex(item => item.OrderId);
+        // The one tenant owned table with no other tenant leading index, so
+        // here the standalone one is not redundant.
+        builder.HasIndex(item => new { item.TenantId, item.OrderId });
 
         UserConfiguration.ConfigureTenantColumn(builder);
     }
