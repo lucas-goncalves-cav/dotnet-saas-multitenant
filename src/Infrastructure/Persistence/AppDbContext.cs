@@ -30,6 +30,11 @@ public class AppDbContext : DbContext, IUnitOfWork
 {
     private readonly ITenantContext _tenantContext;
 
+    /// <summary>
+    /// Set only by <see cref="OverrideTenant"/>, for the registration flow.
+    /// </summary>
+    private Guid? _tenantOverride;
+
     public AppDbContext(DbContextOptions<AppDbContext> options, ITenantContext tenantContext)
         : base(options)
     {
@@ -104,7 +109,41 @@ public class AppDbContext : DbContext, IUnitOfWork
     /// filter, which is the opposite of what an unauthenticated request should
     /// get.
     /// </summary>
-    public Guid CurrentTenantId => _tenantContext.TenantId ?? Guid.Empty;
+    public Guid CurrentTenantId => EffectiveTenantId ?? Guid.Empty;
+
+    private Guid? EffectiveTenantId => _tenantOverride ?? _tenantContext.TenantId;
+
+    /// <summary>
+    /// Acts as the given tenant until the returned scope is disposed.
+    ///
+    /// There is exactly one legitimate use: registering a new tenant, where
+    /// the request creates the tenant it is about to write the first user
+    /// into, so there is no authenticated tenant yet. That is a genuine
+    /// chicken and egg problem rather than an oversight.
+    ///
+    /// It is a method with a conspicuous name rather than a mutable property
+    /// so that every use is visible in a diff and short lived by construction.
+    /// </summary>
+    public IDisposable OverrideTenant(Guid tenantId)
+    {
+        if (_tenantOverride is not null)
+        {
+            throw new InvalidOperationException("A tenant override is already active on this context.");
+        }
+
+        _tenantOverride = tenantId;
+
+        return new TenantOverrideScope(this);
+    }
+
+    private sealed class TenantOverrideScope : IDisposable
+    {
+        private readonly AppDbContext _context;
+
+        public TenantOverrideScope(AppDbContext context) => _context = context;
+
+        public void Dispose() => _context._tenantOverride = null;
+    }
 
     public override int SaveChanges()
     {
@@ -130,7 +169,7 @@ public class AppDbContext : DbContext, IUnitOfWork
     /// </summary>
     private void EnforceTenantOnPendingChanges()
     {
-        var tenantId = _tenantContext.TenantId;
+        var tenantId = EffectiveTenantId;
 
         foreach (var entry in ChangeTracker.Entries<TenantEntity>())
         {
@@ -222,9 +261,4 @@ public sealed class CrossTenantAccessException : Exception
     public Guid OwnerTenantId { get; }
 
     public Guid? ActingTenantId { get; }
-}
-
-public interface IUnitOfWork
-{
-    Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
