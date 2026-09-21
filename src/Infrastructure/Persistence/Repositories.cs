@@ -246,32 +246,22 @@ public sealed class AuthRepository : IAuthRepository
     public async Task AddTenantAsync(Tenant tenant, CancellationToken cancellationToken = default) =>
         await _context.Tenants.AddAsync(tenant, cancellationToken);
 
-    public async Task AddUserAsync(User user, Guid tenantId, CancellationToken cancellationToken = default)
-    {
-        // Registration creates the tenant it is writing into, so there is no
-        // authenticated tenant yet and SaveChanges would refuse to stamp this
-        // entity. The override says, explicitly and briefly, which tenant this
-        // work belongs to.
-        _registrationTenantId = tenantId;
-
+    public async Task AddUserAsync(User user, CancellationToken cancellationToken = default) =>
         await _context.Users.AddAsync(user, cancellationToken);
-    }
 
-    private Guid? _registrationTenantId;
-
-    public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// The only writer that supplies its own tenant.
+    ///
+    /// Both auth flows write before a token exists: registration inserts the
+    /// first user of a brand new tenant, and sign in stamps the last login
+    /// timestamp. Without an override the write guard would see no tenant and
+    /// refuse both, which is the correct default and the reason the exception
+    /// is spelled out here rather than made general.
+    /// </summary>
+    public async Task SaveChangesAsync(Guid tenantId, CancellationToken cancellationToken = default)
     {
-        if (_registrationTenantId is null)
-        {
-            await _context.SaveChangesAsync(cancellationToken);
-
-            return;
-        }
-
-        using var scope = _context.OverrideTenant(_registrationTenantId.Value);
+        using var scope = _context.OverrideTenant(tenantId);
 
         await _context.SaveChangesAsync(cancellationToken);
-
-        _registrationTenantId = null;
     }
 }

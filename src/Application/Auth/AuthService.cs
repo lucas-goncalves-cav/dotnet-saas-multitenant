@@ -73,7 +73,16 @@ public interface IAuthRepository
 
     Task AddTenantAsync(Tenant tenant, CancellationToken cancellationToken = default);
 
-    Task AddUserAsync(User user, Guid tenantId, CancellationToken cancellationToken = default);
+    Task AddUserAsync(User user, CancellationToken cancellationToken = default);
 
-    Task SaveChangesAsync(CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Saves while acting as the given tenant.
+    ///
+    /// The tenant is a parameter here and nowhere else in the application,
+    /// because sign in and registration are the only operations that write
+    /// before there is an authenticated tenant to write as. Making them say
+    /// which tenant they mean is better than letting the write guard see no
+    /// tenant at all.
+    /// </summary>
+    Task SaveChangesAsync(Guid tenantId, CancellationToken cancellationToken = default);
 }

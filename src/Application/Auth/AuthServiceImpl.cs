@@ -60,8 +60,11 @@ public sealed class AuthService : IAuthService
             return Result.Failure<LoginResponse>(Error.Unauthorized("Invalid tenant, email or password."));
         }
 
+        // Signing in writes, so it needs a tenant to write as, and the token
+        // that would normally supply one has not been issued yet. The tenant
+        // just resolved from the slug is that tenant.
         user.RecordLogin(DateTime.UtcNow);
-        await _repository.SaveChangesAsync(cancellationToken);
+        await _repository.SaveChangesAsync(tenant.Id, cancellationToken);
 
         return Result.Success(BuildResponse(tenant, user));
     }
@@ -95,10 +98,11 @@ public sealed class AuthService : IAuthService
             _passwordHasher.Hash(request.AdminPassword),
             UserRole.Admin);
 
-        // The tenant is passed explicitly because there is no tenant context
-        // yet: this request created the tenant it is writing to.
-        await _repository.AddUserAsync(admin, tenant.Id, cancellationToken);
-        await _repository.SaveChangesAsync(cancellationToken);
+        await _repository.AddUserAsync(admin, cancellationToken);
+
+        // The tenant is named explicitly because there is no tenant context
+        // yet: this request created the tenant it is writing into.
+        await _repository.SaveChangesAsync(tenant.Id, cancellationToken);
 
         _logger.LogInformation("Registered tenant {Slug} ({TenantId}).", tenant.Slug, tenant.Id);
 
