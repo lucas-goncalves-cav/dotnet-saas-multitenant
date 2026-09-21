@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release /warnaserror
+
+      - name: Test
+        run: dotnet test --no-build --configuration Release --verbosity normal
+
+  isolation-on-sql-server:
+    name: Tenant isolation on SQL Server
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the stack
+        env:
+          SQL_PASSWORD: ${{ secrets.CI_SQL_PASSWORD || 'Ci_Pa55word_For_Tests!' }}
+          JWT_SIGNING_KEY: ci_signing_key_used_only_by_this_workflow_32
+          API_PORT: 8080
+        run: |
+          cat > .env <<EOF
+          SQL_PASSWORD=$SQL_PASSWORD
+          SQL_DATABASE=SaasMultiTenant
+          SQL_PORT=1433
+          JWT_SIGNING_KEY=$JWT_SIGNING_KEY
+          JWT_ISSUER=saas-multitenant
+          JWT_AUDIENCE=saas-multitenant
+          JWT_EXPIRY_MINUTES=60
+          API_PORT=8080
+          ASPNETCORE_ENVIRONMENT=Development
+          EOF
+          docker compose up -d --build
+
+      # The in memory provider proves the filter logic. This job proves the SQL
+      # it turns into, by running the same boundary against SQL Server.
+      - name: Prove cross tenant access is refused
+        run: API=http://localhost:8080 bash scripts/smoke-test.sh
+
+      - name: Show that the generated SQL carries the tenant predicate
+        env:
+          SQL_PASSWORD: ${{ secrets.CI_SQL_PASSWORD || 'Ci_Pa55word_For_Tests!' }}
+        run: |
+          docker compose exec -T sqlserver /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P "$SQL_PASSWORD" -C -d SaasMultiTenant -h -1 -W \
+            -Q "SET NOCOUNT ON; SELECT TOP 5 REPLACE(REPLACE(t.text, CHAR(13), ' '), CHAR(10), ' ') FROM sys.dm_exec_query_stats s CROSS APPLY sys.dm_exec_sql_text(s.sql_handle) t WHERE t.text LIKE '%FROM %Customers%' AND t.text NOT LIKE '%dm_exec%' ORDER BY s.last_execution_time DESC" \
+            | tee generated.sql
+          grep -q 'TenantId] = @__ef_filter__CurrentTenantId' generated.sql \
+            || { echo "The generated SQL is missing the tenant predicate"; exit 1; }
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
+
+  secret-scan:
+    name: No credentials in the repository
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Everything in this repository is a placeholder. This job is what keeps
+      # that true after the twentieth commit, when nobody is checking by hand.
+      - name: Scan for credentials
+        run: |
+          set -e
+          fail=0
+
+          scan() {
+            local pattern="$1" description="$2"
+
+            if grep -rInE "$pattern" \
+                 --include='*.cs' --include='*.json' --include='*.yml' \
+                 --include='*.yaml' --include='*.md' --include='*.sh' \
+                 --exclude-dir=bin --exclude-dir=obj --exclude-dir=.git \
+                 . | grep -v 'your_.*_here' | grep -v 'Ci_Pa55word_For_Tests'; then
+              echo "Possible $description above"
+              fail=1
+            fi
+          }
+
+          scan 'AKIA[0-9A-Z]{16}' 'AWS access key'
+          scan 'ey[A-Za-z0-9_-]{20,}\.ey[A-Za-z0-9_-]{20,}\.' 'JWT'
+          scan '(sk|pk)_(live|test)_[0-9a-zA-Z]{20,}' 'API key'
+          scan '-----BEGIN [A-Z ]*PRIVATE KEY-----' 'private key'
+          scan 'Password=[^;"$]{6,}' 'connection string password'
+
+          if [ -f .env ]; then
+            echo ".env is committed, which it must never be"
+            fail=1
+          fi
+
+          exit $fail
